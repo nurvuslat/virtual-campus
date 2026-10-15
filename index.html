@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Virtual Campus Tour</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/pannellum/build/pannellum.css">
+    <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
+    <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+
+    <div id="search-bar">
+        <input type="text" id="search-input" placeholder="Search for buildings...">
+        <div id="search-results"></div>
+    </div>
+
+    <div id="panorama"></div>
+
+    <div id="minimap-container">
+        <div id="minimap"></div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/pannellum/build/pannellum.js"></script>
+    <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+
+    <script>
+        // --- 1. GLOBAL DEĞİŞKENLER ---
+        let map, imageOverlay, markers = [], directionArrow;
+        let mapLocations = [];
+        let activeMarker = null;
+        let viewer;
+        let currentLocation = null;
+        let onViewChange = null;
+
+        // --- 2. HARİTA MODÜLÜ (map.js) ---
+        const campusMap = {
+        initMap: function(locationsData, onMarkerClick) {
+                        mapLocations = locationsData;
+                        const mapWidth = 2222;  
+                        const mapHeight = 3555; 
+
+                        map = L.map('minimap', {
+                            crs: L.CRS.Simple, // Standart ve hatasız CRS sistemi
+                            minZoom: -1,
+                            maxZoom: 2,
+                            zoomControl: false,
+                            attributionControl: false
+                        });
+
+                        const bounds = [[0, 0], [mapHeight, mapWidth]];
+                        imageOverlay = L.imageOverlay('assets/campus_map.png', bounds).addTo(map);
+                        map.fitBounds(bounds);
+
+                        // Standart dizilime geri döndük: [loc.y, loc.x]
+                        markers = mapLocations.map(loc => {
+                            const marker = L.marker([loc.y, loc.x], { title: loc.name }).addTo(map);
+                            marker.on('click', () => {
+                                this.setActiveMarker(marker);
+                                onMarkerClick(loc);
+                            });
+                            marker.on('mouseover', () => {
+                                marker.bindTooltip(loc.info || loc.name, {permanent: false, direction: 'top'}).openTooltip();
+                            });
+                            marker.on('mouseout', () => { marker.closeTooltip(); });
+                            return marker;
+                        });
+
+                        map.on('click', function(e) {
+                            console.log(`JSON İçin -> "x": ${e.latlng.lng.toFixed(1)}, "y": ${e.latlng.lat.toFixed(1)}`);
+                        });
+                    },
+            setActiveMarker: function(marker) {
+                if (activeMarker && activeMarker.getElement()) activeMarker.getElement().classList.remove('marker-active');
+                activeMarker = marker;
+                if(marker && marker.getElement()) marker.getElement().classList.add('marker-active');
+            },
+            updateDirectionArrow: function(yaw, location) {
+                            if (!directionArrow) {
+                                directionArrow = L.marker([location.y, location.x], { // [location.y, location.x] yapıldı
+                                    icon: L.divIcon({
+                                        className: 'direction-arrow',
+                                        html: '<div class="arrow-rotate" style="transform: rotate(0deg); display: inline-block;"><svg width="32" height="32" viewBox="0 0 32 32"><polygon points="16,4 28,28 16,24 4,28" style="fill:#0078ff;"/></svg></div>',
+                                        iconSize: [32,32],
+                                        iconAnchor: [16,16]
+                                    })
+                                }).addTo(map);
+                            }
+                            directionArrow.setLatLng([location.y, location.x]); // [location.y, location.x] yapıldı
+                            
+                            let angleOffset = 0; 
+                            let finalAngle = yaw + angleOffset;
+
+                            const arrowElement = directionArrow.getElement().querySelector('.arrow-rotate');
+                            if (arrowElement) {
+                                arrowElement.style.transform = `rotate(${finalAngle}deg)`;
+                            }
+                        },
+                        zoomToLocation: function(location) {
+                            map.setView([location.y, location.x], 1); // [location.y, location.x] yapıldı
+                        }
+        };
+
+        // --- 3. NAVİGASYON MODÜLÜ (navigation.js) ---
+        const navigation = {
+            getClosestLocations: function(current, locations, maxCount = 3) {
+                const distances = locations
+                    .filter(loc => loc.id !== current.id)
+                    .map(loc => ({
+                        loc,
+                        dist: Math.sqrt(Math.pow(loc.x - current.x, 2) + Math.pow(loc.y - current.y, 2))
+                    }))
+                    .sort((a, b) => a.dist - b.dist)
+                    .slice(0, maxCount);
+                return distances.map(d => d.loc);
+            },
+            generateHotspots: function(current, locations) {
+                const closest = this.getClosestLocations(current, locations);
+                return closest.map(loc => ({
+                    pitch: 0,
+                    yaw: 0, 
+                    type: "info",
+                    text: loc.name || "İleri Geçiş",
+                    clickHandlerFunc: () => {
+                        panorama.loadPanorama(loc, this.generateHotspots(loc, locations));
+                        const targetMarker = markers[locations.indexOf(loc)];
+                        campusMap.setActiveMarker(targetMarker);
+                        campusMap.updateDirectionArrow(viewer.getYaw(), loc);
+                    }
+                }));
+            }
+        };
+
+        // --- 4. PANORAMA MODÜLÜ (panorama.js) ---
+        const panorama = {
+            loadPanorama: function(location, hotspots = []) {
+                currentLocation = location;
+                const config = {
+                    type: "equirectangular",
+                    panorama: `panoramas/${location.image}`,
+                    autoLoad: true,
+                    showZoomCtrl: true,
+                    showFullscreenCtrl: false,
+                    compass: false,
+                    hotSpots: hotspots,
+                    yaw: 0,
+                    pitch: 0,
+                    hfov: 100,
+                    title: location.name
+                };
+
+                if (viewer) { viewer.destroy(); }
+                viewer = pannellum.viewer('panorama', config);
+                
+                // Kamera her döndüğünde haritadaki yön okunu da tetikle
+                viewer.on('scenechange', () => { campusMap.updateDirectionArrow(viewer.getYaw(), currentLocation); });
+                viewer.on('yawchange', () => { campusMap.updateDirectionArrow(viewer.getYaw(), currentLocation); });
+                campusMap.updateDirectionArrow(viewer.getYaw(), currentLocation);
+            }
+        };
+
+        // --- 5. ARAMA MODÜLÜ (search.js) ---
+        const searchSystem = {
+            initSearch: function(locations) {
+                const input = document.getElementById('search-input');
+                const results = document.getElementById('search-results');
+                input.addEventListener('input', () => {
+                    const query = input.value.toLowerCase();
+                    if (!query) {
+                        results.style.display = 'none';
+                        results.innerHTML = '';
+                        return;
+                    }
+                    const matches = locations.filter(loc => loc.name.toLowerCase().includes(query));
+                    results.innerHTML = matches.map(loc => `<div class="search-result" data-id="${loc.id}">${loc.name}</div>`).join('');
+                    results.style.display = matches.length ? 'block' : 'none';
+                });
+                results.addEventListener('click', e => {
+                    if (e.target.classList.contains('search-result')) {
+                        const id = parseInt(e.target.dataset.id);
+                        const location = locations.find(loc => loc.id === id);
+                        panorama.loadPanorama(location, navigation.generateHotspots(location, locations));
+                        campusMap.zoomToLocation(location);
+                        campusMap.setActiveMarker(markers[locations.indexOf(location)]);
+                        campusMap.updateDirectionArrow(viewer.getYaw(), location);
+                        results.style.display = 'none';
+                        input.value = '';
+                    }
+                });
+            }
+        };
+
+        // --- 6. ANA BAŞLATICI ---
+        window.addEventListener('DOMContentLoaded', () => {
+            console.log("Uygulama başlatıldı...");
+
+            fetch('./data/panoramas.json') 
+            .then(res => {
+                if (!res.ok) throw new Error("JSON dosyası bulunamadı! data/panoramas.json dosyasını kontrol edin.");
+                return res.json();
+            })
+            .then(locations => {
+                // 1. Haritayı başlat
+                campusMap.initMap(locations, location => {
+                    panorama.loadPanorama(location, navigation.generateHotspots(location, locations));
+                });
+
+                // 2. Arama sistemini başlat
+                searchSystem.initSearch(locations);
+
+                // 3. İlk açılış panoramasını yükle
+                panorama.loadPanorama(locations[0], navigation.generateHotspots(locations[0], locations));
+            })
+            .catch(err => {
+                alert("Hata: " + err.message);
+            });
+        });
+    </script>
+</body>
+</html>
